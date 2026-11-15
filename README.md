@@ -469,7 +469,9 @@ and not expose the HuRI server port directly.
 ### Client SDK
 
 `huri_core.core.client.HuRIClient` (`huri-core[client]`) owns the websocket,
-the handshake and the framing, and calls your handlers:
+the handshake and the framing, and calls your handlers. Malformed server
+frames are skipped with a warning naming their kind and size, without logging
+the payload; later frames and connection-close notifications still arrive:
 
 ```python
 client = HuRIClient(url, modules={"shout": {"name": "shout"}}, sends=["echo.text"])

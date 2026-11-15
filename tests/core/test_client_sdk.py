@@ -82,6 +82,65 @@ def test_frames_round_trip():
     )
 
 
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        pytest.param('{"type": "status"}', id="missing-topic"),
+        pytest.param('{"topic": "toy.token"}', id="missing-data"),
+        pytest.param("[1]", id="json-list"),
+        pytest.param('{"topic": [], "data": {"text": "bad"}}', id="list-topic"),
+        pytest.param('{"topic": {}, "data": {"text": "bad"}}', id="dict-topic"),
+        pytest.param("not json", id="invalid-json"),
+        pytest.param(b"\x00", id="short-header"),
+        pytest.param(b"\x00\x05ab", id="truncated-topic"),
+        pytest.param(b"\x00\x02\xff\xfe", id="invalid-topic-utf8"),
+        pytest.param(
+            (b"\xff\xff\xff" + b"PRIVATE" * 150000)[:1048576], id="large-binary"
+        ),
+    ],
+)
+def test_malformed_frames_preserve_delivery_and_closed_status(bad_frame, caplog):
+    got = []
+    seen, record = _recorder()
+
+    async def scenario():
+        outgoing = [
+            encode("toy.token", Text("before")),
+            bad_frame,
+            encode("toy.token", Text("after")),
+        ]
+        async with FakeHuRI(outgoing=outgoing, close_with=(1000, "done")) as server:
+            client = HuRIClient(server.url, modules={})
+            client.on("toy.token", Text, lambda event: _append(got, event.text))
+            client.on_connection(record)
+            async with client:
+                receiving = client._tasks[0]
+                await until(
+                    lambda: (len(got) == 2 and len(seen) == 2)
+                    or (receiving.done() and receiving.exception() is not None)
+                )
+                await client.wait_closed()
+
+    run(scenario())
+    assert got == ["before", "after"]
+    assert seen == [
+        ConnectionMessage("connected"),
+        ConnectionMessage("closed", detail="done", code=1000),
+    ]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.name == "huri.client" and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].message
+    assert "malformed" in message
+    assert ("binary" if isinstance(bad_frame, bytes) else "text") in message
+    assert str(len(bad_frame)) in message
+    assert "PRIVATE" not in message
+    assert len(message) < 300
+
+
 def test_handshake_declares_the_session_and_server_parses_it():
     async def scenario():
         async with FakeHuRI() as server:
